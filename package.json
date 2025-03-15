@@ -16,11 +16,16 @@
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.6.1",
     "@solana/web3.js": "^1.98.0",
+    "dotenv": "^16.4.7",
+    "mongodb": "^6.14.2",
+    "mongoose": "^8.12.1",
     "ts-node": "^10.9.2",
-    "typescript": "^5.8.2",
     "zod": "^3.24.2"
   },
   "devDependencies": {
-    "@types/node": "^22.13.10"
+    "@types/dotenv": "^8.2.3",
+    "@types/mongoose": "^5.11.97",
+    "@types/node": "^22.13.10",
+    "typescript": "^5.8.2"
   }
 }

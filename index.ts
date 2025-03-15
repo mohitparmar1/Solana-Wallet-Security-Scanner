@@ -2,6 +2,8 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
 import { Connection, PublicKey, LAMPORTS_PER_SOL, clusterApiUrl } from "@solana/web3.js";
+import { connectToDatabase } from "./db/connection";
+import { SuspiciousWallet, SuspiciousProgram, SuspiciousPattern } from "./models/RiskData";
 
 // Create an MCP server
 const server = new McpServer({
@@ -12,48 +14,74 @@ const server = new McpServer({
 // Initialize Solana connection
 const connection = new Connection(clusterApiUrl("mainnet-beta"), "confirmed");
 
-// Risk patterns database (in-memory storage)
+// Connect to MongoDB
+connectToDatabase().catch(console.error);
+
+// Risk Database class using MongoDB
 class RiskDatabase {
-    private suspiciousWallets: Set<string> = new Set();
-    private suspiciousPrograms: Set<string> = new Set();
-    private suspiciousPatterns: Set<string> = new Set();
-
     constructor() {
-        // Initialize with some default patterns
-        this.suspiciousPatterns.add("token-2022.approve");
-        this.suspiciousPatterns.add("system.advance-nonce");
-        this.suspiciousPatterns.add("unknown-program");
+        // Initialize default patterns
+        this.initializeDefaultPatterns();
     }
 
-    addSuspiciousWallet(address: string) {
-        this.suspiciousWallets.add(address);
+    private async initializeDefaultPatterns() {
+        const defaultPatterns = [
+            { pattern: "token-2022.approve", description: "Token approval" },
+            { pattern: "system.advance-nonce", description: "Nonce advancement" },
+            { pattern: "unknown-program", description: "Unknown program interaction" }
+        ];
+
+        for (const pattern of defaultPatterns) {
+            await SuspiciousPattern.findOneAndUpdate(
+                { pattern: pattern.pattern },
+                pattern,
+                { upsert: true }
+            );
+        }
     }
 
-    addSuspiciousProgram(address: string) {
-        this.suspiciousPrograms.add(address);
+    async addSuspiciousWallet(address: string, reason: string) {
+        await SuspiciousWallet.create({ address, reason });
     }
 
-    addSuspiciousPattern(pattern: string) {
-        this.suspiciousPatterns.add(pattern);
+    async addSuspiciousProgram(address: string, reason: string) {
+        await SuspiciousProgram.create({ address, reason });
     }
 
-    isSuspiciousWallet(address: string): boolean {
-        return this.suspiciousWallets.has(address);
+    async addSuspiciousPattern(pattern: string, description: string) {
+        await SuspiciousPattern.create({ pattern, description });
     }
 
-    isSuspiciousProgram(address: string): boolean {
-        return this.suspiciousPrograms.has(address);
+    async isSuspiciousWallet(address: string): Promise<boolean> {
+        const wallet = await SuspiciousWallet.findOne({ address });
+        return wallet !== null;
     }
 
-    getSuspiciousPatterns(): string[] {
-        return Array.from(this.suspiciousPatterns);
+    async isSuspiciousProgram(address: string): Promise<boolean> {
+        const program = await SuspiciousProgram.findOne({ address });
+        return program !== null;
     }
 
-    getDatabase(): { wallets: string[], programs: string[], patterns: string[] } {
+    async getSuspiciousPatterns(): Promise<string[]> {
+        const patterns = await SuspiciousPattern.find();
+        return patterns.map(p => p.pattern);
+    }
+
+    async getDatabase(): Promise<{
+        wallets: string[],
+        programs: string[],
+        patterns: string[]
+    }> {
+        const [wallets, programs, patterns] = await Promise.all([
+            SuspiciousWallet.find(),
+            SuspiciousProgram.find(),
+            SuspiciousPattern.find()
+        ]);
+
         return {
-            wallets: Array.from(this.suspiciousWallets),
-            programs: Array.from(this.suspiciousPrograms),
-            patterns: Array.from(this.suspiciousPatterns)
+            wallets: wallets.map(w => w.address),
+            programs: programs.map(p => p.address),
+            patterns: patterns.map(p => p.pattern)
         };
     }
 }
@@ -75,9 +103,9 @@ server.tool(
             new PublicKey(address);
 
             if (type === "wallet") {
-                riskDB.addSuspiciousWallet(address);
+                await riskDB.addSuspiciousWallet(address, reason);
             } else {
-                riskDB.addSuspiciousProgram(address);
+                await riskDB.addSuspiciousProgram(address, reason);
             }
 
             return {
@@ -104,7 +132,7 @@ server.tool(
     },
     async ({ pattern, description }) => {
         try {
-            riskDB.addSuspiciousPattern(pattern);
+            await riskDB.addSuspiciousPattern(pattern, description);
             return {
                 content: [{
                     type: "text",
@@ -125,7 +153,7 @@ server.tool(
     "View all suspicious addresses and patterns in the database",
     {},
     async () => {
-        const db = riskDB.getDatabase();
+        const db = await riskDB.getDatabase();
         let report = `📋 Risk Database Contents\n`;
         report += `━━━━━━━━━━━━━━━━━━━━\n\n`;
 
@@ -177,7 +205,7 @@ server.tool(
             };
 
             // Check if the wallet itself is suspicious
-            if (riskDB.isSuspiciousWallet(walletAddress)) {
+            if (await riskDB.isSuspiciousWallet(walletAddress)) {
                 warnings.push("⚠️ This wallet address is marked as suspicious in the database");
                 riskScore += 3;
             }
@@ -209,35 +237,39 @@ server.tool(
                 }
 
                 // Check program interactions
-                tx.transaction.message.accountKeys.forEach(key => {
+                const accountKeys = tx.transaction.message.accountKeys;
+                for (const key of accountKeys) {
                     const address = key.pubkey.toString();
-                    if (riskDB.isSuspiciousProgram(address)) {
+                    const isSuspicious = await riskDB.isSuspiciousProgram(address);
+                    if (isSuspicious) {
                         details.suspiciousPrograms.add(address);
                         riskScore += 2;
                     }
-                });
+                }
 
                 // Check for interactions with suspicious wallets
-                tx.transaction.message.accountKeys.forEach(key => {
+                for (const key of accountKeys) {
                     const address = key.pubkey.toString();
-                    if (riskDB.isSuspiciousWallet(address)) {
+                    const isSuspicious = await riskDB.isSuspiciousWallet(address);
+                    if (isSuspicious) {
                         details.suspiciousInteractions.add(address);
                         riskScore += 2;
                     }
-                });
+                }
 
                 // Check for suspicious patterns in logs
                 const logs = tx.meta.logMessages || [];
-                logs.forEach(log => {
-                    riskDB.getSuspiciousPatterns().forEach(pattern => {
+                const suspiciousPatterns = await riskDB.getSuspiciousPatterns();
+                for (const log of logs) {
+                    for (const pattern of suspiciousPatterns) {
                         if (log.toLowerCase().includes(pattern.toLowerCase())) {
                             details.unusualPatterns.add(
                                 `Found suspicious pattern: ${pattern} in transaction ${sigInfo.signature}`
                             );
                             riskScore += 1;
                         }
-                    });
-                });
+                    }
+                }
             }
 
             // Generate report
@@ -253,35 +285,35 @@ server.tool(
 
             if (details.highValueTransactions.length > 0) {
                 report += `💰 High-Value Transactions:\n`;
-                details.highValueTransactions.forEach(tx => {
+                for (const tx of details.highValueTransactions) {
                     const date = new Date(tx.timestamp * 1000).toLocaleDateString();
                     report += `• ${tx.amount.toFixed(2)} SOL on ${date}\n`;
                     report += `  Signature: ${tx.signature}\n`;
-                });
+                }
                 report += '\n';
             }
 
             if (details.suspiciousPrograms.size > 0) {
                 report += `🚨 Suspicious Program Interactions:\n`;
-                details.suspiciousPrograms.forEach(program => {
+                for (const program of details.suspiciousPrograms) {
                     report += `• ${program}\n`;
-                });
+                }
                 report += '\n';
             }
 
             if (details.suspiciousInteractions.size > 0) {
                 report += `⚠️ Interactions with Suspicious Wallets:\n`;
-                details.suspiciousInteractions.forEach(wallet => {
+                for (const wallet of details.suspiciousInteractions) {
                     report += `• ${wallet}\n`;
-                });
+                }
                 report += '\n';
             }
 
             if (details.unusualPatterns.size > 0) {
                 report += `📋 Unusual Patterns:\n`;
-                details.unusualPatterns.forEach(pattern => {
+                for (const pattern of details.unusualPatterns) {
                     report += `• ${pattern}\n`;
-                });
+                }
                 report += '\n';
             }
 
