@@ -4,14 +4,27 @@ import mongoose from 'mongoose';
 const suspiciousWalletSchema = new mongoose.Schema({
     address: { type: String, required: true, unique: true },
     reason: { type: String },
-    dateAdded: { type: Date, default: Date.now }
+    dateAdded: { type: Date, default: Date.now },
+    analysis: {
+        balanceSOL: { type: Number },
+        tokenAccounts: { type: Number },
+        recentTransactions: { type: Number },
+        lastActivity: { type: Date },
+        dateAnalyzed: { type: Date, default: Date.now }
+    }
 });
 
 // Schema for suspicious programs
 const suspiciousProgramSchema = new mongoose.Schema({
     address: { type: String, required: true, unique: true },
     reason: { type: String },
-    dateAdded: { type: Date, default: Date.now }
+    dateAdded: { type: Date, default: Date.now },
+    analysis: {
+        accountCount: { type: Number },
+        recentTransactions: { type: Number },
+        lastActivity: { type: Date },
+        dateAnalyzed: { type: Date, default: Date.now }
+    }
 });
 
 // Schema for suspicious patterns

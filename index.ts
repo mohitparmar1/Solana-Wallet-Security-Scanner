@@ -88,10 +88,10 @@ class RiskDatabase {
 
 const riskDB = new RiskDatabase();
 
-// Tool to add suspicious wallets/programs
+// Tool to add suspicious wallets/programs with on-chain verification
 server.tool(
     "addSuspiciousAddress",
-    "Add a suspicious wallet or program address to the risk database",
+    "Add a suspicious wallet or program address to the risk database with on-chain verification",
     {
         address: z.string(),
         type: z.enum(["wallet", "program"]),
@@ -99,24 +99,84 @@ server.tool(
     },
     async ({ address, type, reason }) => {
         try {
-            // Validate the address
-            new PublicKey(address);
+            const pubkey = new PublicKey(address);
 
-            if (type === "wallet") {
-                await riskDB.addSuspiciousWallet(address, reason);
+            // On-chain verification
+            if (type === "program") {
+                // Verify if it's actually a program account
+                const accountInfo = await connection.getAccountInfo(pubkey);
+                if (!accountInfo?.executable) {
+                    return {
+                        content: [{
+                            type: "text",
+                            text: `❌ Error: Address ${address} is not a program account. Please verify the address.`
+                        }]
+                    };
+                }
+
+                // Get program activity metrics
+                const programAccounts = await connection.getProgramAccounts(pubkey, {
+                    commitment: 'confirmed',
+                });
+
+                // Additional program analysis
+                const recentSignatures = await connection.getSignaturesForAddress(pubkey, { limit: 10 });
+                const programActivity = {
+                    accountCount: programAccounts.length,
+                    recentTransactions: recentSignatures.length,
+                    lastActivity: recentSignatures[0]?.blockTime || 0
+                };
+
+                await riskDB.addSuspiciousProgram(address, JSON.stringify({
+                    reason,
+                    programActivity,
+                    dateAdded: new Date().toISOString()
+                }));
+
+                return {
+                    content: [{
+                        type: "text",
+                        text: `✅ Added suspicious program:\nAddress: ${address}\nReason: ${reason}\n\n📊 Program Stats:\n• Associated Accounts: ${programActivity.accountCount}\n• Recent Transactions: ${programActivity.recentTransactions}\n• Last Activity: ${new Date(programActivity.lastActivity * 1000).toLocaleDateString()}`
+                    }]
+                };
+
             } else {
-                await riskDB.addSuspiciousProgram(address, reason);
+                // Wallet verification and analysis
+                const balance = await connection.getBalance(pubkey);
+                const recentActivity = await connection.getSignaturesForAddress(pubkey, { limit: 10 });
+
+                // Get token accounts
+                const tokenAccounts = await connection.getParsedTokenAccountsByOwner(pubkey, {
+                    programId: new PublicKey('TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA'), // Token Program
+                });
+
+                const walletAnalysis = {
+                    balanceSOL: balance / LAMPORTS_PER_SOL,
+                    tokenAccounts: tokenAccounts.value.length,
+                    recentTransactions: recentActivity.length,
+                    lastActivity: recentActivity[0]?.blockTime || 0
+                };
+
+                await riskDB.addSuspiciousWallet(address, JSON.stringify({
+                    reason,
+                    walletAnalysis,
+                    dateAdded: new Date().toISOString()
+                }));
+
+                return {
+                    content: [{
+                        type: "text",
+                        text: `✅ Added suspicious wallet:\nAddress: ${address}\nReason: ${reason}\n\n📊 Wallet Stats:\n• Balance: ${walletAnalysis.balanceSOL} SOL\n• Token Accounts: ${walletAnalysis.tokenAccounts}\n• Recent Transactions: ${walletAnalysis.recentTransactions}\n• Last Activity: ${new Date(walletAnalysis.lastActivity * 1000).toLocaleDateString()}`
+                    }]
+                };
             }
 
+        } catch (error) {
             return {
                 content: [{
                     type: "text",
-                    text: `✅ Successfully added suspicious ${type}:\nAddress: ${address}\nReason: ${reason}`
+                    text: `Error adding address: ${(error as Error).message}\nPlease verify the address and try again.`
                 }]
-            };
-        } catch (error) {
-            return {
-                content: [{ type: "text", text: `Error adding address: ${(error as Error).message}` }]
             };
         }
     }
